@@ -113,7 +113,16 @@ def get_model_dimensions_from_labels(model_labels):
     num_factors = len(factors.keys())
     num_states = [len(factors[factor]) for factor in factors.keys()]
 
-    return num_obs, num_modalities, num_states, num_factors
+    if 'actions' in model_labels.keys():
+
+        controls = model_labels['actions']
+        num_control_fac = len(controls.keys())
+        num_controls = [len(controls[cfac]) for cfac in controls.keys()]
+
+        return num_obs, num_modalities, num_states, num_factors, num_controls, num_control_fac
+    else:
+        return num_obs, num_modalities, num_states, num_factors
+
 
 def norm_dist(dist):
     if len(dist.shape) == 3:
@@ -384,19 +393,53 @@ def create_A_matrix_stub(model_labels):
 
     state_combinations = pd.MultiIndex.from_product(list(state_labels.values()), names=list(state_labels.keys()))
     num_state_combos = np.prod(num_states)
-    num_rows = (np.array(num_obs) * num_state_combos).sum()
+    # num_rows = (np.array(num_obs) * num_state_combos).sum()
+    num_rows = sum(num_obs)
+
     cell_values = np.zeros((num_rows, len(state_combinations)))
 
     obs_combinations = []
     for modality in obs_labels.keys():
         levels_to_combine = [[modality]] + [obs_labels[modality]]
-        obs_combinations += num_state_combos * list(itertools.product(*levels_to_combine))
+        # obs_combinations += num_state_combos * list(itertools.product(*levels_to_combine))
+        obs_combinations += list(itertools.product(*levels_to_combine))
 
-    obs_combinations = pd.MultiIndex.from_tuples(obs_combinations)
+
+    obs_combinations = pd.MultiIndex.from_tuples(obs_combinations, names = ["Modality", "Level"])
 
     A_matrix = pd.DataFrame(cell_values, index = obs_combinations, columns=state_combinations)
 
     return A_matrix
+
+def create_B_matrix_stubs(model_labels):
+
+    _, _, num_states, _, num_controls, _ = get_model_dimensions_from_labels(model_labels)
+
+    state_labels = model_labels['states']
+    action_labels = model_labels['actions']
+
+    B_matrices = {}
+
+    for f_idx, factor in enumerate(state_labels.keys()):
+
+        control_fac_name = list(action_labels)[f_idx]
+        factor_list = [state_labels[factor]] + [action_labels[control_fac_name]]
+
+        prev_state_action_combos = pd.MultiIndex.from_product(factor_list, names=[factor, list(action_labels.keys())[f_idx]])
+
+        num_state_action_combos = num_states[f_idx] * num_controls[f_idx]
+
+        num_rows = num_states[f_idx]
+
+        cell_values = np.zeros((num_rows, num_state_action_combos))
+
+        next_state_list = state_labels[factor]
+        
+        B_matrix_f = pd.DataFrame(cell_values, index = next_state_list, columns=prev_state_action_combos)
+
+        B_matrices[factor] = B_matrix_f
+
+    return B_matrices
 
 def read_A_matrix(path):
     raw_table = pd.read_excel(path, header=None)
@@ -409,3 +452,65 @@ def read_A_matrix(path):
         index_col=list(range(level_counts["index"])),
         header=list(range(level_counts["header"]))
         ).astype(np.float64)
+
+def read_B_matrices(path):
+
+    all_sheets = pd.read_excel(path, sheet_name = None, header=None)
+
+    level_counts = {}
+    for sheet_name, raw_table in all_sheets.items():
+    
+        level_counts[sheet_name] = {
+            "index": raw_table.iloc[0, :].dropna().index[0]+1,
+            "header": raw_table.iloc[0, :].dropna().index[0]+2,
+        }
+
+    stub_dict = {}
+    for sheet_name, level_counts_sheet in level_counts.items():
+        sheet_f = pd.read_excel(
+            path,
+            sheet_name = sheet_name,
+            index_col=list(range(level_counts_sheet["index"])),
+            header=list(range(level_counts_sheet["header"]))
+            ).astype(np.float64)
+        stub_dict[sheet_name] = sheet_f
+        
+    return stub_dict
+
+def convert_A_stub_to_ndarray(A_stub, model_labels):
+    """
+    This function converts a multi-index pandas dataframe `A_stub` into an object array of different
+    A matrices, one per observation modality. 
+    """
+
+    num_obs, num_modalities, num_states, num_factors = get_model_dimensions_from_labels(model_labels)
+
+    A = obj_array(num_modalities)
+
+    for g, modality_name in enumerate(model_labels['observations'].keys()):
+        A[g] = A_stub.loc[modality_name].to_numpy().reshape(num_obs[g], *num_states)
+        assert (A[g].sum(axis=0) == 1.0).all(), 'A matrix not normalized! Check your initialization....\n'
+
+    return A
+
+def convert_B_stubs_to_ndarray(B_stubs, model_labels):
+    """
+    This function converts a list of multi-index pandas dataframes `B_stubs` into an object array
+    of different B matrices, one per hidden state factor
+    """
+
+    _, _, num_states, num_factors, num_controls, num_control_fac  = get_model_dimensions_from_labels(model_labels)
+
+    B = obj_array(num_factors)
+
+    for f, factor_name in enumerate(B_stubs.keys()):
+        
+        B[f] = B_stubs[factor_name].to_numpy().reshape(num_states[f], num_states[f], num_controls[f])
+        assert (B[f].sum(axis=0) == 1.0).all(), 'B matrix not normalized! Check your initialization....\n'
+
+    return B
+
+
+    
+   
+
